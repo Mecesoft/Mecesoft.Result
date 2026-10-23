@@ -1,0 +1,51 @@
+# Mecesoft.Result public API baseline
+# Source: published NuGet package Mecesoft.Result 1.0.2 (published 2025-09-16).
+# Published DLL SHA-256: 42f106a4a93c2e8c57090d74996db659f8881ee33a687904bba18be516f8d2c3
+# Lines beginning with # are ignored by PublicApiBaselineTests.
+# This baseline captures public type/member signatures, constraints, init/optional
+# parameters, and the JsonIgnore marker. Nullable reference annotations are not captured.
+TYPE Mecesoft.Result.PagesListQueryableExtensions [static class]
+  METHOD static [extension] System.Threading.Tasks.Task<Mecesoft.Result.PaginationResult<T>> ToPagedListAsync<T>(System.Linq.IQueryable<T> source, System.Int32 pageNumber, System.Int32 pageSize, System.Threading.CancellationToken cancellationToken = default) where T : class
+TYPE Mecesoft.Result.PaginationMeta [sealed class]
+  CTOR ()
+  PROP System.Boolean HasNextPage { get; init; }
+  PROP System.Boolean HasPreviousPage { get; init; }
+  PROP System.Int32 PageNumber { get; init; }
+  PROP System.Int32 PageSize { get; init; }
+  PROP System.Int32 TotalPages { get; init; }
+  PROP System.Int64 TotalRecords { get; init; }
+  METHOD static Mecesoft.Result.PaginationMeta Create(System.Int32 pageNumber, System.Int32 pageSize, System.Int64 totalRecords, System.Int32 totalPages)
+TYPE Mecesoft.Result.PaginationResultBase [class]
+  CTOR (System.Int32 pageNumber, System.Int32 pageSize, System.Int32 totalCount)
+  PROP System.Boolean IsFirstPage { get; set; }
+  PROP System.Boolean IsLastPage { get; set; }
+  PROP System.Int32 PageNumber { get; set; }
+  PROP System.Int32 PageSize { get; set; }
+  PROP System.Int32 TotalCount { get; set; }
+  PROP System.Int32 TotalPages { get; set; }
+TYPE Mecesoft.Result.PaginationResult<T> [class] : Mecesoft.Result.PaginationResultBase
+  GENERIC T
+  CTOR (System.Collections.Generic.IList<T> datas, System.Int32 pageNumber, System.Int32 pageSize, System.Int32 totalCount)
+  PROP System.Collections.Generic.IList<T> Datas { get; set; }
+TYPE Mecesoft.Result.Result<T> [sealed class]
+  GENERIC T
+  CTOR (System.Int32 statusCode, System.Collections.Generic.List<System.String> errorMessages)
+  CTOR (System.Int32 statusCode, System.String errorMessage)
+  CTOR (T data)
+  CTOR (T data, Mecesoft.Result.PaginationResultBase pagination)
+  CTOR (T data, System.Object pagination)
+  PROP T Data { get; set; }
+  PROP System.Collections.Generic.List<System.String> ErrorMessages { get; set; }
+  PROP System.Boolean IsSuccessful { get; set; }
+  PROP System.Object Pagination { get; set; }
+  PROP System.Int32 StatusCode { get; set; } [JsonIgnore]
+  METHOD static Mecesoft.Result.Result<T> Failure(System.Collections.Generic.List<System.String> errorMessages)
+  METHOD static Mecesoft.Result.Result<T> Failure(System.Int32 statusCode, System.Collections.Generic.List<System.String> errorMessages)
+  METHOD static Mecesoft.Result.Result<T> Failure(System.Int32 statusCode, System.String errorMessage)
+  METHOD static Mecesoft.Result.Result<T> Failure(System.String errorMessage)
+  METHOD static Mecesoft.Result.Result<T> Succeed(T data)
+  METHOD static Mecesoft.Result.Result<T> Succeed(T data, Mecesoft.Result.PaginationResultBase pagination)
+  METHOD static Mecesoft.Result.Result<T> Succeed(T data, System.Object pagination)
+  METHOD static Mecesoft.Result.Result<T> op_Implicit(System.ValueTuple<System.Int32, System.Collections.Generic.List<System.String>> parameters)
+  METHOD static Mecesoft.Result.Result<T> op_Implicit(System.ValueTuple<System.Int32, System.String> parameters)
+  METHOD static Mecesoft.Result.Result<T> op_Implicit(T data)

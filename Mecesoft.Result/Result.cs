@@ -147,17 +147,49 @@ public static class PagesListQueryableExtensions
         if (pageSize < 1) pageSize = 10;
 
         var count = await source.CountAsync(cancellationToken);
-        if (count > 0)
+        if (count == 0)
         {
-            var items = await source
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .AsNoTracking()
-                .ToListAsync(cancellationToken);
-
-            return new(items, pageNumber, pageSize, count);
+            return new(null, pageNumber, pageSize, 0);
         }
 
-        return new(null, 0, 0, 0);
+        // Use long arithmetic so a large page number cannot overflow the offset.
+        // When the offset is at or beyond the row count, return an empty page
+        // without issuing a query; the cast below is then always safe.
+        var offset = ((long)pageNumber - 1) * pageSize;
+        if (offset >= count)
+        {
+            return new(new List<T>(), pageNumber, pageSize, count);
+        }
+
+        var items = await source
+            .Skip((int)offset)
+            .Take(pageSize)
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        return new(items, pageNumber, pageSize, count);
+    }
+}
+
+public sealed class PaginationMeta
+{
+    public int PageNumber { get; init; }
+    public int PageSize { get; init; }
+    public long TotalRecords { get; init; }
+    public int TotalPages { get; init; }
+    public bool HasNextPage { get; init; }
+    public bool HasPreviousPage { get; init; }
+
+    public static PaginationMeta Create(int pageNumber, int pageSize, long totalRecords, int totalPages)
+    {
+        return new PaginationMeta
+        {
+            PageNumber = pageNumber,
+            PageSize = pageSize,
+            TotalRecords = totalRecords,
+            TotalPages = totalPages,
+            HasNextPage = pageNumber < totalPages,
+            HasPreviousPage = pageNumber > 1 && totalPages > 0
+        };
     }
 }

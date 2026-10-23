@@ -1,6 +1,38 @@
+# Build output
 bin/
 obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+TestResults/
+
+# NuGet packages and symbols
 /packages/
+*.nupkg
+*.snupkg
+
+# IDE and editor files
+.vs/
+.vscode/
+.idea/
+_ReSharper.Caches/
 riderModule.iml
-/_ReSharper.Caches/
-/.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local secrets and environment files
+.env
+.env.*
+*.local.json
+appsettings.*.local.json
+secrets.json
+
+# Signing material
+*.pfx
+*.snk

@@ -1,13 +1,55 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
+        <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+
+        <PackageId>Mecesoft.Result</PackageId>
+        <Title>Mecesoft.Result</Title>
+        <Version>1.1.0</Version>
+        <AssemblyVersion>1.0.2.0</AssemblyVersion>
+        <FileVersion>1.1.0.0</FileVersion>
+        <PackageReleaseNotes>Added .NET 8 and .NET 10 targets. Fixed pagination offset overflow, empty-result pagination metadata, and PaginationMeta.HasPreviousPage for empty datasets. Public API remains compatible with 1.0.2.</PackageReleaseNotes>
+        <Authors>Mecesoft</Authors>
+        <Company>Mecesoft</Company>
+        <Description>Lightweight generic Result wrapper with pagination helpers for .NET (EF Core friendly).</Description>
+        <PackageTags>result;response;pagination;efcore;mecesoft</PackageTags>
+        <RepositoryUrl>https://github.com/Mecesoft/Mecesoft.Result</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageProjectUrl>https://github.com/Mecesoft/Mecesoft.Result</PackageProjectUrl>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageIcon>Mecesoft.Result_256.png</PackageIcon>
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.0" />
+        <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.402" PrivateAssets="All" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.32" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.21" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.13" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="\" />
+        <None Include="LICENSE" Pack="true" PackagePath="\" />
+        <None Remove="Mecesoft.Result_256.png" />
+        <None Include="Mecesoft.Result_256.png" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>
