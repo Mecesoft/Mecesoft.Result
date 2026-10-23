@@ -1,0 +1,277 @@
+name: Publish NuGet
+
+# Bootstrap note:
+# This workflow is dispatched from master, but builds the immutable release tag.
+# The `nuget` GitHub environment must allow the exact `master` branch in addition
+# to the existing `v*` tag policy, otherwise GitHub rejects the publish job.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Immutable release tag matching vMAJOR.MINOR.PATCH"
+        required: true
+        type: string
+      expected_commit:
+        description: "Expected 40-character commit SHA of the release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nuget-publish
+  cancel-in-progress: false
+
+env:
+  NUGET_USER: ${{ vars.NUGET_USER }}
+
+jobs:
+  preflight:
+    name: Verify tag, source, version and CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout immutable release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify NuGet username variable
+        run: |
+          set -euo pipefail
+          test -n "${NUGET_USER:-}" || {
+            echo "Repository variable NUGET_USER is required (NuGet profile name, not email)" >&2
+            exit 1
+          }
+
+      - name: Verify tag, source and package version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+
+          [[ "$REF" == "refs/heads/master" ]] || {
+            echo "This publication workflow must be dispatched from master" >&2
+            exit 1
+          }
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release_tag must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          }
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected_commit must be a 40-character lowercase SHA" >&2
+            exit 1
+          }
+
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$EXPECTED_COMMIT"
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+
+          git fetch --no-tags origin "+refs/heads/master:refs/remotes/origin/master"
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/master
+
+          VERSION="$(dotnet msbuild Mecesoft.Result/Mecesoft.Result.csproj -getProperty:Version -nologo | tail -n 1 | tr -d '\r')"
+          test "v${VERSION}" = "$RELEASE_TAG"
+
+      - name: Verify tagged commit passed CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?per_page=100" \
+            | jq -e --arg sha "$EXPECTED_COMMIT" \
+              'any(.workflow_runs[]; .head_sha == $sha and .status == "completed" and .conclusion == "success")' \
+              >/dev/null
+
+      - name: Verify version is not already on NuGet.org
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          for ext in nupkg snupkg; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
+            if [[ "$status" != "404" ]]; then
+              echo "NuGet endpoint for ${VERSION}.${ext} returned ${status}; refusing to continue" >&2
+              exit 1
+            fi
+          done
+
+  publish:
+    name: Build and publish with OIDC
+    needs: preflight
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: nuget
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout immutable release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Verify checked-out source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$EXPECTED_COMMIT"
+          VERSION="$(dotnet msbuild Mecesoft.Result/Mecesoft.Result.csproj -getProperty:Version -nologo | tail -n 1 | tr -d '\r')"
+          test "v${VERSION}" = "$RELEASE_TAG"
+
+      - name: Restore
+        run: dotnet restore tests/Mecesoft.Result.Tests/Mecesoft.Result.Tests.csproj
+
+      - name: Build production (Release, all target frameworks)
+        run: >-
+          dotnet build Mecesoft.Result/Mecesoft.Result.csproj
+          -c Release
+          --no-restore
+          -p:GeneratePackageOnBuild=false
+          -p:ContinuousIntegrationBuild=true
+
+      - name: Build tests (Release, all target frameworks)
+        run: >-
+          dotnet build tests/Mecesoft.Result.Tests/Mecesoft.Result.Tests.csproj
+          -c Release
+          --no-restore
+          -p:GeneratePackageOnBuild=false
+          -p:ContinuousIntegrationBuild=true
+
+      - name: Test .NET 8
+        run: >-
+          dotnet test tests/Mecesoft.Result.Tests/Mecesoft.Result.Tests.csproj
+          -c Release -f net8.0 --no-build --no-restore
+          --logger "console;verbosity=minimal"
+
+      - name: Test .NET 9
+        run: >-
+          dotnet test tests/Mecesoft.Result.Tests/Mecesoft.Result.Tests.csproj
+          -c Release -f net9.0 --no-build --no-restore
+          --logger "console;verbosity=minimal"
+
+      - name: Test .NET 10
+        run: >-
+          dotnet test tests/Mecesoft.Result.Tests/Mecesoft.Result.Tests.csproj
+          -c Release -f net10.0 --no-build --no-restore
+          --logger "console;verbosity=minimal"
+
+      - name: Pack exact tagged source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          dotnet pack Mecesoft.Result/Mecesoft.Result.csproj \
+            -c Release \
+            --no-build \
+            --no-restore \
+            -p:GeneratePackageOnBuild=false \
+            -p:ContinuousIntegrationBuild=true \
+            -o artifacts/packages
+
+      - name: Validate package metadata and SourceLink
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          NUPKG="artifacts/packages/Mecesoft.Result.${VERSION}.nupkg"
+          SNUPKG="artifacts/packages/Mecesoft.Result.${VERSION}.snupkg"
+
+          test -f "$NUPKG"
+          test -f "$SNUPKG"
+          unzip -t "$NUPKG" >/dev/null
+          unzip -t "$SNUPKG" >/dev/null
+
+          unzip -p "$NUPKG" Mecesoft.Result.nuspec > artifacts/nuspec.xml
+          grep -F "<version>${VERSION}</version>" artifacts/nuspec.xml >/dev/null
+          grep -F "commit=\"${EXPECTED_COMMIT}\"" artifacts/nuspec.xml >/dev/null
+          grep -F 'README.md' <(unzip -l "$NUPKG") >/dev/null
+          grep -F 'LICENSE' <(unzip -l "$NUPKG") >/dev/null
+          grep -F 'Mecesoft.Result_256.png' <(unzip -l "$NUPKG") >/dev/null
+
+          for tfm in net8.0 net9.0 net10.0; do
+            grep -F "lib/${tfm}/Mecesoft.Result.dll" <(unzip -l "$NUPKG") >/dev/null
+            grep -F "targetFramework=\"${tfm}\"" artifacts/nuspec.xml >/dev/null
+            grep -F "lib/${tfm}/Mecesoft.Result.pdb" <(unzip -l "$SNUPKG") >/dev/null
+            unzip -p "$SNUPKG" "lib/${tfm}/Mecesoft.Result.pdb" \
+              | strings \
+              | grep -F "raw.githubusercontent.com/Mecesoft/Mecesoft.Result/${EXPECTED_COMMIT}/" \
+                >/dev/null
+          done
+
+      - name: NuGet login (OIDC to temporary API key)
+        id: login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ env.NUGET_USER }}
+
+      - name: Push package and symbols
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          NUPKG="artifacts/packages/Mecesoft.Result.${VERSION}.nupkg"
+
+          for ext in nupkg snupkg; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
+            if [[ "$status" != "404" ]]; then
+              echo "Version ${VERSION}.${ext} is no longer absent; refusing to push" >&2
+              exit 1
+            fi
+          done
+
+          dotnet nuget push "$NUPKG" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY"
+
+          for ext in nupkg snupkg; do
+            code=""
+            for _ in $(seq 1 12); do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' \
+                "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
+              if [[ "$code" == "200" ]]; then
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$code" != "200" ]]; then
+              echo "NuGet package ${VERSION}.${ext} not visible (last HTTP ${code})" >&2
+              exit 1
+            fi
+          done
