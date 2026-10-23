@@ -101,14 +101,21 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
-          for ext in nupkg snupkg; do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' \
-              "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
-            if [[ "$status" != "404" ]]; then
-              echo "NuGet endpoint for ${VERSION}.${ext} returned ${status}; refusing to continue" >&2
+          # Only the .nupkg endpoint is a valid pre-publication existence check.
+          # NuGet.org does not expose .snupkg through flatcontainer.
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+            "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.nupkg" || true)"
+          case "$status" in
+            404) ;;
+            200)
+              echo "FAILED: Mecesoft.Result ${VERSION} is already published; refusing to push again" >&2
               exit 1
-            fi
-          done
+              ;;
+            *)
+              echo "FAILED: unexpected HTTP ${status} while checking whether ${VERSION} exists" >&2
+              exit 1
+              ;;
+          esac
 
   publish:
     name: Build and publish with OIDC
@@ -242,36 +249,130 @@ jobs:
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          NUGET_VERIFY_TIMEOUT_SECONDS: "1200"
+          NUGET_VERIFY_INITIAL_DELAY: "15"
+          NUGET_VERIFY_MAX_DELAY: "60"
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
           NUPKG="artifacts/packages/Mecesoft.Result.${VERSION}.nupkg"
+          SNUPKG="artifacts/packages/Mecesoft.Result.${VERSION}.snupkg"
+          NUPKG_URL="https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.nupkg"
+          PUSH_LOG="$(mktemp)"
+          SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          trap 'rm -f "$PUSH_LOG"' EXIT
 
-          for ext in nupkg snupkg; do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' \
-              "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
-            if [[ "$status" != "404" ]]; then
-              echo "Version ${VERSION}.${ext} is no longer absent; refusing to push" >&2
+          {
+            echo "## NuGet publication"
+            echo ""
+            echo "- Package: \`Mecesoft.Result ${VERSION}\`"
+            echo "- Commit: \`${EXPECTED_COMMIT}\`"
+            echo ""
+            echo "| Status | Detail |"
+            echo "|---|---|"
+          } >> "$SUMMARY_FILE"
+
+          summary_status() {
+            local status="$1"
+            shift
+            printf '| **%s** | %s |\n' "$status" "$*" >> "$SUMMARY_FILE"
+          }
+
+          # A pre-existing .nupkg is a duplicate-version refusal.
+          # Any status other than 404 is unexpected and must fail safely.
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$NUPKG_URL" || true)"
+          case "$status" in
+            404) ;;
+            200)
+              echo "FAILED: Mecesoft.Result ${VERSION} is already published; refusing to push again" >&2
+              summary_status FAILED "Version ${VERSION} already exists on NuGet.org; upload refused"
               exit 1
+              ;;
+            *)
+              echo "FAILED: unexpected HTTP ${status} while checking whether ${VERSION} exists" >&2
+              summary_status FAILED "Unexpected HTTP ${status} while checking existing version"
+              exit 1
+              ;;
+          esac
+
+          # A non-zero exit here is a real upload failure (auth, rejection or conflict).
+          if ! dotnet nuget push "$NUPKG" \
+              --source https://api.nuget.org/v3/index.json \
+              --api-key "$NUGET_API_KEY" 2>&1 | tee "$PUSH_LOG"; then
+            echo "FAILED: dotnet nuget push failed; see the upload error above" >&2
+            summary_status FAILED "dotnet nuget push failed; see upload output"
+            exit 1
+          fi
+
+          # dotnet nuget push also pushes the adjacent .snupkg. Verify that both
+          # file names were observed instead of assuming only the .nupkg was sent.
+          if ! grep -F "$(basename "$NUPKG")" "$PUSH_LOG" >/dev/null \
+             || ! grep -F "$(basename "$SNUPKG")" "$PUSH_LOG" >/dev/null; then
+            echo "FAILED: both nupkg and snupkg uploads were not observed in the push output" >&2
+            summary_status FAILED "nupkg or snupkg upload was not observed in push output"
+            exit 1
+          fi
+          echo "UPLOADED: Mecesoft.Result ${VERSION} nupkg and snupkg accepted by NuGet.org"
+          echo "SYMBOLS: UPLOADED (symbol indexing is asynchronous; .snupkg is not exposed via flatcontainer)"
+          summary_status UPLOADED "nupkg and snupkg accepted by NuGet.org"
+          summary_status UPLOADED "snupkg accepted; symbol indexing is asynchronous"
+
+          # NuGet.org indexing is asynchronous. A 404 after an accepted upload means
+          # VALIDATING, not FAILED. Poll with backoff, but never hide auth/rejection
+          # responses or a non-zero dotnet push result above.
+          START="${SECONDS}"
+          DELAY="${NUGET_VERIFY_INITIAL_DELAY}"
+          MAX_DELAY="${NUGET_VERIFY_MAX_DELAY}"
+          TIMEOUT="${NUGET_VERIFY_TIMEOUT_SECONDS}"
+          ATTEMPT=0
+          VALIDATING_RECORDED=0
+
+          while :; do
+            ATTEMPT=$((ATTEMPT + 1))
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$NUPKG_URL" || true)"
+            ELAPSED=$((SECONDS - START))
+
+            case "$CODE" in
+              200)
+                echo "INDEXED: Mecesoft.Result ${VERSION} nupkg is available (HTTP 200, ${ELAPSED}s)"
+                summary_status INDEXED "nupkg is available (HTTP 200 after ${ELAPSED}s)"
+                exit 0
+                ;;
+              404|000|5??)
+                echo "VALIDATING: Mecesoft.Result ${VERSION} nupkg not indexed yet (HTTP ${CODE}, ${ELAPSED}s)"
+                if (( VALIDATING_RECORDED == 0 )); then
+                  summary_status VALIDATING "nupkg not indexed yet (HTTP ${CODE}); polling with backoff"
+                  VALIDATING_RECORDED=1
+                fi
+                ;;
+              401|403)
+                echo "FAILED: authentication/authorization error while verifying package (HTTP ${CODE})" >&2
+                summary_status FAILED "Authentication/authorization error while verifying package (HTTP ${CODE})"
+                exit 1
+                ;;
+              400|409)
+                echo "FAILED: NuGet rejected or conflicted on the package version (HTTP ${CODE})" >&2
+                summary_status FAILED "NuGet rejected or conflicted on the package version (HTTP ${CODE})"
+                exit 1
+                ;;
+              *)
+                echo "FAILED: unexpected HTTP ${CODE} while verifying package visibility" >&2
+                summary_status FAILED "Unexpected HTTP ${CODE} while verifying package visibility"
+                exit 1
+                ;;
+            esac
+
+            if (( ELAPSED >= TIMEOUT )); then
+              echo "VALIDATING: Mecesoft.Result ${VERSION} upload was accepted, but NuGet indexing is still pending after ${TIMEOUT}s" >&2
+              summary_status VALIDATING "Upload accepted; indexing still pending after ${TIMEOUT}s"
+              echo "::warning title=NuGet indexing pending::Mecesoft.Result ${VERSION} was uploaded, but NuGet.org has not exposed the nupkg within ${TIMEOUT}s. This is an indexing delay, not an upload failure."
+              exit 0
             fi
-          done
 
-          dotnet nuget push "$NUPKG" \
-            --source https://api.nuget.org/v3/index.json \
-            --api-key "$NUGET_API_KEY"
-
-          for ext in nupkg snupkg; do
-            code=""
-            for _ in $(seq 1 12); do
-              code="$(curl -sS -o /dev/null -w '%{http_code}' \
-                "https://api.nuget.org/v3-flatcontainer/mecesoft.result/${VERSION}/mecesoft.result.${VERSION}.${ext}")"
-              if [[ "$code" == "200" ]]; then
-                break
-              fi
-              sleep 5
-            done
-            if [[ "$code" != "200" ]]; then
-              echo "NuGet package ${VERSION}.${ext} not visible (last HTTP ${code})" >&2
-              exit 1
+            sleep "$DELAY"
+            DELAY=$((DELAY * 2))
+            if (( DELAY > MAX_DELAY )); then
+              DELAY="${MAX_DELAY}"
             fi
           done
